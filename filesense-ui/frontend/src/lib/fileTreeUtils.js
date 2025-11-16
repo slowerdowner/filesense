@@ -3,7 +3,11 @@ export function buildFileTree(files) {
   const map = new Map();
 
   files.forEach(file => {
-    map.set(file.path, { ...file, children: [] });
+    const newNode = { ...file, children: [] };
+    if (newNode.is_dir) {
+      newNode.collapsed = true;
+    }
+    map.set(file.path, newNode);
   });
 
   files.forEach(file => {

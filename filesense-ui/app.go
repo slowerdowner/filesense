@@ -2,7 +2,10 @@ package main
 
 import (
 	"context"
+	"archive/zip"
+	"context"
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
@@ -70,4 +73,60 @@ func (a *App) SaveChanges(jsonData string) error {
 	}
 
 	return os.WriteFile(savePath, []byte(jsonData), 0644)
+}
+
+// SelectZipFile opens a save file dialog and returns the selected path.
+func (a *App) SelectZipFile() (string, error) {
+	return runtime.SaveFileDialog(a.ctx, runtime.SaveDialogOptions{
+		Title:           "Save Zip File",
+		DefaultFilename: "archive.zip",
+		Filters: []runtime.FileFilter{
+			{
+				DisplayName: "Zip Files (*.zip)",
+				Pattern:     "*.zip",
+			},
+		},
+	})
+}
+
+// ZipFiles creates a zip archive from a list of file paths.
+func (a *App) ZipFiles(filePaths []string, dest string) error {
+	zipFile, err := os.Create(dest)
+	if err != nil {
+		return err
+	}
+	defer zipFile.Close()
+
+	zipWriter := zip.NewWriter(zipFile)
+	defer zipWriter.Close()
+
+	for _, filePath := range filePaths {
+		fileToZip, err := os.Open(filePath)
+		if err != nil {
+			return err
+		}
+		defer fileToZip.Close()
+
+		info, err := fileToZip.Stat()
+		if err != nil {
+			return err
+		}
+
+		header, err := zip.FileInfoHeader(info)
+		if err != nil {
+			return err
+		}
+		header.Name = filePath // Use the full path for the name in the archive.
+		header.Method = zip.Deflate
+
+		writer, err := zipWriter.CreateHeader(header)
+		if err != nil {
+			return err
+		}
+		_, err = io.Copy(writer, fileToZip)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }

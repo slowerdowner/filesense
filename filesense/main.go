@@ -11,8 +11,11 @@ import (
 	"time"
 
 	"github.com/cozy/goexif2/exif"
+	"archive/zip"
+	"encoding/xml"
 	"github.com/cozy/goexif2/tiff"
 	"github.com/denormal/go-gitignore"
+	pdf "github.com/unidoc/unipdf/v3/model"
 )
 
 // exifWalker is a helper struct to walk the EXIF data.
@@ -34,19 +37,21 @@ type FileInfo struct {
 	ModTime time.Time         `json:"mod_time"`
 	IsDir   bool              `json:"is_dir"`
 	Exif    map[string]string `json:"exif,omitempty"`
+	Pdf     map[string]string `json:"pdf,omitempty"`
+	Ooxml   map[string]string `json:"ooxml,omitempty"`
 }
 
 func main() {
 	rootDir := flag.String("dir", ".", "The directory to scan.")
 	outputFile := flag.String("out", "filesense_output.json", "The name of the output file.")
+	ignoreFile := flag.String("ignore-file", ".filesenseignore", "The path to the ignore file.")
 	flag.Parse()
 
-	ignoreFile := filepath.Join(*rootDir, ".filesenseignore")
 	var ignorer gitignore.GitIgnore
 	// Only try to load the ignore file if it exists
-	if _, err := os.Stat(ignoreFile); err == nil {
+	if _, err := os.Stat(*ignoreFile); err == nil {
 		var parseErr error
-		ignorer, parseErr = gitignore.NewFromFile(ignoreFile)
+		ignorer, parseErr = gitignore.NewFromFile(*ignoreFile)
 		if parseErr != nil {
 			fmt.Printf("error parsing ignore file: %v\n", parseErr)
 			os.Exit(1)
@@ -104,7 +109,90 @@ func main() {
 			}
 		}
 
+		// Extract metadata from PDF files
+		if !info.IsDir() && strings.HasSuffix(strings.ToLower(path), ".pdf") {
+			file, err := os.Open(path)
+			if err != nil {
+				log.Printf("failed to open file %s: %v", path, err)
+			} else {
+				defer file.Close()
+				pdfReader, err := pdf.NewPdfReader(file)
+				if err != nil {
+					log.Printf("failed to create pdf reader for %s: %v", path, err)
+				} else {
+					info, err := pdfReader.GetPdfInfo()
+					if err != nil {
+						log.Printf("failed to get pdf info from %s: %v", path, err)
+					}
+					if info != nil {
+						fileInfo.Pdf = make(map[string]string)
+						if info.Author != nil {
+								fileInfo.Pdf["Author"] = DecodePdfText(info.Author.String())
+						}
+						if info.Title != nil {
+								fileInfo.Pdf["Title"] = DecodePdfText(info.Title.String())
+						}
+						if info.Subject != nil {
+								fileInfo.Pdf["Subject"] = DecodePdfText(info.Subject.String())
+						}
+						if info.Creator != nil {
+								fileInfo.Pdf["Creator"] = DecodePdfText(info.Creator.String())
+						}
+						if info.Producer != nil {
+								fileInfo.Pdf["Producer"] = DecodePdfText(info.Producer.String())
+						}
+					}
+				}
+			}
+		}
+
 		files = append(files, fileInfo)
+
+		// Extract metadata from OOXML files
+		if !info.IsDir() && (strings.HasSuffix(strings.ToLower(path), ".docx") || strings.HasSuffix(strings.ToLower(path), ".xlsx") || strings.HasSuffix(strings.ToLower(path), ".pptx")) {
+			r, err := zip.OpenReader(path)
+			if err != nil {
+				log.Printf("failed to open ooxml file %s: %v", path, err)
+			} else {
+				defer r.Close()
+				for _, f := range r.File {
+					if f.Name == "docProps/core.xml" {
+						rc, err := f.Open()
+						if err != nil {
+							log.Printf("failed to open core.xml for %s: %v", path, err)
+							break
+						}
+						defer rc.Close()
+
+						decoder := xml.NewDecoder(rc)
+						fileInfo.Ooxml = make(map[string]string)
+						for {
+							token, err := decoder.Token()
+							if err != nil {
+								break
+							}
+							switch se := token.(type) {
+							case xml.StartElement:
+								var s string
+								if err := decoder.DecodeElement(&s, &se); err == nil {
+									switch se.Name.Local {
+									case "title":
+										fileInfo.Ooxml["Title"] = s
+									case "creator":
+										fileInfo.Ooxml["Creator"] = s
+									case "subject":
+										fileInfo.Ooxml["Subject"] = s
+									case "modified":
+										fileInfo.Ooxml["Modified"] = s
+									}
+								}
+							}
+						}
+						break
+					}
+				}
+			}
+		}
 
 		return nil
 	})
@@ -127,4 +215,16 @@ func main() {
 	}
 
 	fmt.Printf("Successfully wrote metadata to %s\n", *outputFile)
+}
+
+func DecodePdfText(s string) string {
+	if len(s) > 2 && s[0] == 254 && s[1] == 255 {
+		s = s[2:]
+		out := make([]rune, len(s)/2)
+		for i := 0; i < len(s); i += 2 {
+			out[i/2] = rune(s[i])<<8 | rune(s[i+1])
+		}
+		return string(out)
+	}
+	return s
 }

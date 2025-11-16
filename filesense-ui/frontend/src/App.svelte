@@ -1,13 +1,31 @@
 <script>
-  import {LoadJSON, SaveChanges} from '../wailsjs/go/main/App.js'
+  import {LoadJSON, SaveChanges, ZipFiles, SelectZipFile} from '../wailsjs/go/main/App.js'
   import FileTree from './lib/FileTree.svelte'
+  import ContextMenu from './lib/ContextMenu.svelte'
   import {buildFileTree, flattenTree} from './lib/fileTreeUtils.js'
+  import { setContext } from 'svelte';
+  import { selectedPaths } from './lib/stores.js';
 
   let files = [];
   let stagedFiles = [];
   let error = '';
 
   let originalFlatFiles = [];
+  let lastSelected = null;
+
+  let history = [];
+
+  let contextMenu = {
+    visible: false,
+    x: 0,
+    y: 0,
+    file: null,
+  };
+
+  setContext('selection', {
+    setLastSelected: (path) => lastSelected = path,
+    getLastSelected: () => lastSelected,
+  });
 
   async function loadJSON() {
     try {
@@ -15,28 +33,56 @@
       originalFlatFiles = JSON.parse(jsonData);
       files = buildFileTree(originalFlatFiles);
       stagedFiles = JSON.parse(JSON.stringify(files)); // Deep copy
+      history = [JSON.stringify(stagedFiles)];
       error = '';
     } catch (e) {
       error = e;
     }
   }
 
-  function dateStamp(nodes) {
-    nodes.forEach(node => {
-      const date = new Date(node.mod_time);
-      const year = date.getFullYear();
-      const month = String(date.getMonth() + 1).padStart(2, '0');
-      const day = String(date.getDate()).padStart(2, '0');
-      const prefix = `${year}${month}${day}`;
+  function pushState() {
+    history.push(JSON.stringify(stagedFiles));
+    history = history;
+  }
 
-      if (!node.name.startsWith(prefix)) {
-        node.name = `${prefix}_${node.name}`;
-      }
-      if (node.children) {
-        dateStamp(node.children);
-      }
-    });
+  function dateStamp(nodes) {
+    pushState();
+    let currentSelectedPaths;
+    selectedPaths.subscribe(value => currentSelectedPaths = value)();
+
+    function traverse(nodes) {
+      nodes.forEach(node => {
+        if (currentSelectedPaths.has(node.path)) {
+          const date = new Date(node.mod_time);
+          const year = date.getFullYear();
+          const month = String(date.getMonth() + 1).padStart(2, '0');
+          const day = String(date.getDate()).padStart(2, '0');
+          const prefix = `${year}${month}${day}`;
+
+          if (!node.name.startsWith(prefix)) {
+            node.name = `${prefix}_${node.name}`;
+          }
+        }
+        if (node.children) {
+          traverse(node.children);
+        }
+      });
+    }
+    traverse(nodes);
     stagedFiles = stagedFiles; // Trigger reactivity
+  }
+
+  function startOver() {
+    stagedFiles = JSON.parse(JSON.stringify(files));
+    history = [JSON.stringify(stagedFiles)];
+  }
+
+  function undo() {
+    if (history.length > 1) {
+      history.pop();
+      stagedFiles = JSON.parse(history[history.length - 1]);
+      history = history;
+    }
   }
 
 
@@ -62,13 +108,142 @@
     }
   }
 
+  function showContextMenu(event) {
+    contextMenu.visible = true;
+    contextMenu.x = event.detail.x;
+    contextMenu.y = event.detail.y;
+    contextMenu.file = event.detail.file;
+  }
+
+  function handleContextMenuAction(event) {
+    contextMenu.visible = false;
+    const action = event.detail;
+    if (action === 'delete') {
+      softDelete();
+    } else if (action === 'zip') {
+      zipSelected();
+    }
+  }
+
+  function closeContextMenu() {
+    contextMenu.visible = false;
+  }
+
+  function handleMove(event) {
+    pushState();
+    const { draggedFilePath, targetPath } = event.detail;
+
+    let draggedFile, targetFile, draggedFileParent;
+
+    function findFile(nodes, path, parent = null) {
+      for (let i = 0; i < nodes.length; i++) {
+        const node = nodes[i];
+        if (node.path === path) {
+          return {node, parent};
+        }
+        if (node.children) {
+          const found = findFile(node.children, path, node);
+          if (found) return found;
+        }
+      }
+      return null;
+    }
+
+    const dragged = findFile(stagedFiles, draggedFilePath);
+    draggedFile = dragged.node;
+    draggedFileParent = dragged.parent;
+
+    const target = findFile(stagedFiles, targetPath);
+    targetFile = target.node;
+
+    if (!draggedFile || !targetFile) return;
+
+    // Remove from old parent
+    const sourceList = draggedFileParent ? draggedFileParent.children : stagedFiles;
+    const index = sourceList.findIndex(f => f.path === draggedFilePath);
+    sourceList.splice(index, 1);
+
+    // Add to new parent
+    if (targetFile.is_dir) {
+      targetFile.children.push(draggedFile);
+      draggedFile.path = targetFile.path + '/' + draggedFile.name;
+    } else {
+      const targetParent = findFile(stagedFiles, targetPath).parent;
+      const destList = targetParent ? targetParent.children : stagedFiles;
+      destList.push(draggedFile);
+      draggedFile.path = (targetParent ? targetParent.path + '/' : '') + draggedFile.name;
+    }
+
+    stagedFiles = stagedFiles;
+  }
+
+  function softDelete() {
+    pushState();
+    let currentSelectedPaths;
+    selectedPaths.subscribe(value => currentSelectedPaths = value)();
+
+    let discardFolder = stagedFiles.find(f => f.name === '99_Discard' && f.is_dir);
+    if (!discardFolder) {
+      discardFolder = {
+        name: '99_Discard',
+        path: '99_Discard',
+        is_dir: true,
+        children: [],
+        collapsed: false,
+      };
+      stagedFiles.push(discardFolder);
+    }
+
+    let filesToMove = [];
+
+    function findFilesToMove(nodes) {
+      for (let i = nodes.length - 1; i >= 0; i--) {
+        const node = nodes[i];
+        if (currentSelectedPaths.has(node.path)) {
+          filesToMove.push(node);
+          nodes.splice(i, 1);
+        } else if (node.children) {
+          findFilesToMove(node.children);
+        }
+      }
+    }
+
+    findFilesToMove(stagedFiles);
+
+    filesToMove.forEach(file => {
+      discardFolder.children.push(file);
+      file.path = discardFolder.path + '/' + file.name;
+    });
+
+    stagedFiles = stagedFiles;
+  }
+
+  async function zipSelected() {
+    let currentSelectedPaths;
+    selectedPaths.subscribe(value => currentSelectedPaths = value)();
+
+    const paths = Array.from(currentSelectedPaths);
+    if (paths.length === 0) return;
+
+    try {
+      const dest = await SelectZipFile();
+      if (dest) {
+        await ZipFiles(paths, dest);
+      }
+    } catch (e) {
+      error = e;
+    }
+  }
+
 </script>
 
-<main>
+<main on:click={closeContextMenu}>
   <div class="toolbar">
     <button on:click={loadJSON}>Load JSON</button>
     <button on:click={() => dateStamp(stagedFiles)}>Date Stamp</button>
     <button on:click={saveChanges}>Save Changes</button>
+    <button on:click={startOver}>Start Over</button>
+    <button on:click={undo} disabled={history.length <= 1}>Undo</button>
   </div>
   <div class="container">
     <div class="pane" id="left-pane">
@@ -80,9 +255,13 @@
     </div>
     <div class="pane" id="right-pane">
       <h2>Changes</h2>
-      <FileTree files={stagedFiles} editable={true} />
+      <FileTree files={stagedFiles} editable={true} on:contextmenu={showContextMenu} on:move={handleMove} />
     </div>
   </div>
+
+  {#if contextMenu.visible}
+    <ContextMenu x={contextMenu.x} y={contextMenu.y} on:action={handleContextMenuAction} />
+  {/if}
 </main>
 
 <style>
@@ -126,6 +305,11 @@
 
   button:hover {
     background-color: var(--button-hover-bg);
+  }
+
+  button:disabled {
+    background-color: #555;
+    cursor: not-allowed;
   }
 
   .container {
