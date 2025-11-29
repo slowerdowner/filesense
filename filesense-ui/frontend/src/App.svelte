@@ -1,74 +1,73 @@
 <script>
-  import {LoadJSON, SaveChanges} from '../wailsjs/go/main/App.js'
-  import FileTree from './lib/FileTree.svelte'
-  import {buildFileTree, flattenTree} from './lib/fileTreeUtils.js'
+  import { ScanDirectory, ApplyChanges } from "../wailsjs/go/main/App.js";
+  import FileTree from "./lib/FileTree.svelte";
+  import RuleEditor from "./lib/RuleEditor.svelte";
+  import { buildFileTree, flattenTree } from "./lib/fileTreeUtils.js";
+  import { applyRules } from "./lib/ruleEngine.js";
 
   let files = [];
   let stagedFiles = [];
-  let error = '';
+  let error = "";
+  let rules = [];
 
   let originalFlatFiles = [];
 
-  async function loadJSON() {
+  async function scanDirectory() {
     try {
-      const jsonData = await LoadJSON();
-      originalFlatFiles = JSON.parse(jsonData);
+      originalFlatFiles = await ScanDirectory();
       files = buildFileTree(originalFlatFiles);
-      stagedFiles = JSON.parse(JSON.stringify(files)); // Deep copy
-      error = '';
+      updateStagedFiles();
+      error = "";
     } catch (e) {
       error = e;
     }
   }
 
-  function dateStamp(nodes) {
-    nodes.forEach(node => {
-      const date = new Date(node.mod_time);
-      const year = date.getFullYear();
-      const month = String(date.getMonth() + 1).padStart(2, '0');
-      const day = String(date.getDate()).padStart(2, '0');
-      const prefix = `${year}${month}${day}`;
-
-      if (!node.name.startsWith(prefix)) {
-        node.name = `${prefix}_${node.name}`;
-      }
-      if (node.children) {
-        dateStamp(node.children);
-      }
-    });
-    stagedFiles = stagedFiles; // Trigger reactivity
+  function updateStagedFiles() {
+    if (files.length === 0) return;
+    stagedFiles = applyRules(files, rules);
   }
 
+  function handleRulesChange(event) {
+    rules = event.detail;
+    updateStagedFiles();
+  }
 
-  async function saveChanges() {
+  async function applyChanges() {
     try {
       const flattenedStaged = flattenTree(stagedFiles);
-      const changes = flattenedStaged.map((file) => {
-        const originalFile = originalFlatFiles.find(f => f.path === file.path);
-        if (originalFile && file.name !== originalFile.name) {
-          return {
-            ...originalFile,
-            new_name: file.name,
-            new_path: file.path.substring(0, file.path.lastIndexOf('/') + 1) + file.name,
-          };
-        }
-        return null;
-      }).filter(Boolean);
+      const changes = flattenedStaged
+        .map((file) => {
+          const originalFile = originalFlatFiles.find(
+            (f) => f.path === file.path,
+          );
+          if (originalFile && file.name !== originalFile.name) {
+            return {
+              ...originalFile,
+              new_name: file.name,
+              new_path:
+                file.path.substring(0, file.path.lastIndexOf("/") + 1) +
+                file.name,
+            };
+          }
+          return null;
+        })
+        .filter(Boolean);
 
-      await SaveChanges(JSON.stringify(changes, null, 2));
-      error = '';
+      await ApplyChanges(JSON.stringify(changes, null, 2));
+      error = "";
+      // Refresh the view after applying changes
+      await scanDirectory();
     } catch (e) {
       error = e;
     }
   }
-
 </script>
 
 <main>
   <div class="toolbar">
-    <button on:click={loadJSON}>Load JSON</button>
-    <button on:click={() => dateStamp(stagedFiles)}>Date Stamp</button>
-    <button on:click={saveChanges}>Save Changes</button>
+    <button on:click={scanDirectory}>Scan Directory</button>
+    <button on:click={applyChanges}>Apply Changes</button>
   </div>
   <div class="container">
     <div class="pane" id="left-pane">
@@ -76,11 +75,15 @@
       {#if error}
         <p class="error">{error}</p>
       {/if}
-      <FileTree files={files} />
+      <FileTree {files} />
+    </div>
+    <div class="pane" id="center-pane">
+      <h2>Rules</h2>
+      <RuleEditor {rules} on:change={handleRulesChange} />
     </div>
     <div class="pane" id="right-pane">
-      <h2>Changes</h2>
-      <FileTree files={stagedFiles} editable={true} />
+      <h2>Preview</h2>
+      <FileTree files={stagedFiles} editable={false} />
     </div>
   </div>
 </main>
@@ -97,62 +100,82 @@
   }
 
   main {
-    background-color: var(--background-color);
-    color: var(--text-color);
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol";
     height: 100vh;
     width: 100vw;
     margin: 0;
     padding: 0;
     display: flex;
     flex-direction: column;
+    background: transparent; /* Handled by body */
   }
 
   .toolbar {
-    padding: 0.5rem;
-    background-color: var(--pane-background);
-    border-bottom: 1px solid var(--border-color);
+    padding: 1rem 1.5rem;
+    background: rgba(15, 23, 42, 0.6);
+    border-bottom: var(--pane-border);
+    backdrop-filter: blur(10px);
+    display: flex;
+    gap: 1rem;
+    align-items: center;
   }
 
   button {
-    background-color: var(--button-bg);
+    background: var(--accent-color);
     color: white;
-    padding: 10px 15px;
+    padding: 8px 16px;
     border: none;
-    border-radius: 4px;
+    border-radius: 6px;
     cursor: pointer;
-    margin-right: 0.5rem;
+    font-weight: 500;
+    font-size: 0.9rem;
+    transition: all 0.2s;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
   }
 
   button:hover {
-    background-color: var(--button-hover-bg);
+    background: var(--accent-hover);
+    transform: translateY(-1px);
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.15);
   }
 
   .container {
-    display: flex;
+    display: grid;
+    grid-template-columns: 1fr 350px 1fr;
+    gap: 1.5rem;
+    padding: 1.5rem;
     flex-grow: 1;
-    padding: 1rem;
-    box-sizing: border-box;
-    overflow-y: hidden;
+    overflow: hidden;
   }
 
   .pane {
-    flex: 1;
-    background-color: var(--pane-background);
-    border-radius: 8px;
-    padding: 1rem;
-    margin: 0 0.5rem;
-    border: 1px solid var(--border-color);
-    overflow-y: auto;
+    background: var(--pane-bg);
+    border-radius: var(--radius);
+    padding: 1.5rem;
+    border: var(--pane-border);
+    backdrop-filter: blur(10px);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    box-shadow: var(--shadow);
   }
 
   h2 {
-    margin-top: 0;
-    border-bottom: 1px solid var(--border-color);
-    padding-bottom: 0.5rem;
+    margin: 0 0 1rem 0;
+    padding-bottom: 0.8rem;
+    border-bottom: var(--pane-border);
+    font-size: 1.1rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    letter-spacing: 0.02em;
   }
 
   .error {
-    color: var(--error-color);
+    color: var(--danger-color);
+    background: rgba(239, 68, 68, 0.1);
+    padding: 0.8rem;
+    border-radius: 6px;
+    margin-bottom: 1rem;
+    border: 1px solid rgba(239, 68, 68, 0.2);
+    font-size: 0.9rem;
   }
 </style>

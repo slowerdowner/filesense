@@ -1,0 +1,23 @@
+[
+  {
+    "name": "file1.txt",
+    "path": "test_data/file1.txt",
+    "size": 8,
+    "mod_time": "2025-11-29T13:16:34.132216297-05:00",
+    "is_dir": false
+  },
+  {
+    "name": "subdir",
+    "path": "test_data/subdir",
+    "size": 4096,
+    "mod_time": "2025-11-29T13:16:34.131216303-05:00",
+    "is_dir": true
+  },
+  {
+    "name": "file2.txt",
+    "path": "test_data/subdir/file2.txt",
+    "size": 0,
+    "mod_time": "2025-11-29T13:16:34.131216303-05:00",
+    "is_dir": false
+  }
+]
